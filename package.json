@@ -1,0 +1,12 @@
+
+{
+  "name": "pakhomo-api",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "node-appwrite": "^20.0.0"
+  }
+}
