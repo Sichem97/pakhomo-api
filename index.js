@@ -1,7 +1,7 @@
 
 import { Client, TablesDB, Query } from 'node-appwrite';
 
-export default async ({ req, res, log, error }) => {
+export default async ({ req, res, error }) => {
   try {
     const client = new Client()
       .setEndpoint(process.env.APPWRITE_FUNCTION_API_ENDPOINT)
@@ -15,14 +15,32 @@ export default async ({ req, res, log, error }) => {
       tableId: '6af040f70027940736cb',
       queries: [
         Query.equal('status', ['Approved']),
-        Query.limit(1)
+        Query.limit(100)
       ]
     });
 
+    const properties = result.rows.map((row) => ({
+      id: row.$id,
+      title: row.Title,
+      description: row.Description,
+      countryCode: row.countryCode,
+      city: row.City,
+      area: row.Area,
+      type: row.propertyType,
+      listingType: row.listingType,
+      price: row.Price,
+      currency: row.Currency,
+      bedrooms: row.Bedrooms,
+      bathrooms: row.Bathrooms,
+      size: row.size,
+      imageUrl: row.ImageField,
+      verified: row.verified
+    }));
+
     return res.json({
       success: true,
-      message: 'Pakhomo database connected!',
-      approvedProperties: result.total
+      total: result.total,
+      properties
     });
 
   } catch (err) {
@@ -30,8 +48,7 @@ export default async ({ req, res, log, error }) => {
 
     return res.json({
       success: false,
-      message: 'Database connection failed',
-      error: err.message
+      message: 'Unable to retrieve properties'
     }, 500);
   }
 };
