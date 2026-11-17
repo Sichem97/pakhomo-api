@@ -13,6 +13,9 @@ const DATABASE_ID = '6af03fb20005efbe0a7e';
 const TABLE_ID = '6af040f70027940736cb';
 const BUCKET_ID = '6af03fd9001df76cc2b7';
 
+const FUNCTION_DOMAIN =
+  'https://starter-function-dtms.fra.appwrite.run';
+
 const allowedTypes = {
   'image/jpeg': 'jpg',
   'image/png': 'png',
@@ -21,9 +24,11 @@ const allowedTypes = {
 
 function validateImage(buffer, mimeType) {
   if (mimeType === 'image/jpeg') {
-    return buffer[0] === 0xff &&
+    return (
+      buffer[0] === 0xff &&
       buffer[1] === 0xd8 &&
-      buffer[2] === 0xff;
+      buffer[2] === 0xff
+    );
   }
 
   if (mimeType === 'image/png') {
@@ -65,7 +70,7 @@ export default async ({ req, res, log, error }) => {
         }, 400);
       }
 
-      // Only retrieve images belonging to approved properties.
+      // Only deliver images belonging to approved properties.
       const result = await tablesDB.listRows({
         databaseId: DATABASE_ID,
         tableId: TABLE_ID,
@@ -105,7 +110,7 @@ export default async ({ req, res, log, error }) => {
         200,
         {
           'Content-Type': file.mimeType,
-          'Cache-Control': 'public, max-age=300',
+          'Cache-Control': 'private, max-age=60',
           'X-Content-Type-Options': 'nosniff'
         }
       );
@@ -146,7 +151,7 @@ export default async ({ req, res, log, error }) => {
         bedrooms: row.Bedrooms,
         bathrooms: row.Bathrooms,
         size: row.size,
-        imageUrl: `/images/${encodeURIComponent(row.ImageField)}`,
+        imageUrl: `${FUNCTION_DOMAIN}/images/${encodeURIComponent(row.ImageField)}`,
         verified: row.verified
       }));
 
@@ -225,7 +230,14 @@ export default async ({ req, res, log, error }) => {
         }, 400);
       }
 
-      if (!['House', 'Apartment', 'Land', 'Shop', 'Office', 'Hotel'].includes(property.type)) {
+      if (![
+        'House',
+        'Apartment',
+        'Land',
+        'Shop',
+        'Office',
+        'Hotel'
+      ].includes(property.type)) {
         return res.json({
           success: false,
           message: 'Invalid property type.'
@@ -255,7 +267,10 @@ export default async ({ req, res, log, error }) => {
         }, 400);
       }
 
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(property.ownerEmail)) {
+      if (
+        typeof property.ownerEmail !== 'string' ||
+        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(property.ownerEmail)
+      ) {
         return res.json({
           success: false,
           message: 'Invalid email address.'
@@ -325,8 +340,14 @@ export default async ({ req, res, log, error }) => {
           listingType: property.listingType,
           Price: price,
           Currency: property.currency,
-          Bedrooms: Math.max(0, Math.floor(Number(property.bedrooms) || 0)),
-          Bathrooms: Math.max(0, Math.floor(Number(property.bathrooms) || 0)),
+          Bedrooms: Math.max(
+            0,
+            Math.floor(Number(property.bedrooms) || 0)
+          ),
+          Bathrooms: Math.max(
+            0,
+            Math.floor(Number(property.bathrooms) || 0)
+          ),
           ImageField: uploadedFileId,
           ownerName: String(property.ownerName).trim(),
           ownerPhone: String(property.ownerPhone).trim(),
