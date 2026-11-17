@@ -13,11 +13,32 @@ const DATABASE_ID = '6af03fb20005efbe0a7e';
 const TABLE_ID = '6af040f70027940736cb';
 const BUCKET_ID = '6af03fd9001df76cc2b7';
 
-const allowedTypes = [
-  'image/jpeg',
-  'image/png',
-  'image/webp'
-];
+const allowedTypes = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp'
+};
+
+function validateImage(buffer, mimeType) {
+  if (mimeType === 'image/jpeg') {
+    return buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+  }
+
+  if (mimeType === 'image/png') {
+    return buffer.subarray(0, 8).equals(
+      Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])
+    );
+  }
+
+  if (mimeType === 'image/webp') {
+    return (
+      buffer.toString('ascii', 0, 4) === 'RIFF' &&
+      buffer.toString('ascii', 8, 12) === 'WEBP'
+    );
+  }
+
+  return false;
+}
 
 export default async ({ req, res, log, error }) => {
   const client = new Client()
@@ -28,7 +49,7 @@ export default async ({ req, res, log, error }) => {
   const tablesDB = new TablesDB(client);
   const storage = new Storage(client);
 
-  // PUBLIC PROPERTY LISTINGS
+  // PUBLIC PROPERTY LIST
   if (req.method === 'GET') {
     try {
       const result = await tablesDB.listRows({
@@ -65,44 +86,37 @@ export default async ({ req, res, log, error }) => {
       });
     } catch (err) {
       error(err.message);
+
       return res.json({
         success: false,
-        message: 'Unable to retrieve properties'
+        message: 'Unable to retrieve properties.'
       }, 500);
     }
   }
 
-  // PROPERTY SUBMISSIONS
+  // PROPERTY SUBMISSION
   if (req.method === 'POST') {
     let uploadedFileId = null;
 
     try {
-      const contentType = req.headers['content-type'] || '';
+      const payload = req.bodyJson;
 
-      if (!contentType.includes('multipart/form-data')) {
+      if (!payload || typeof payload !== 'object') {
         return res.json({
           success: false,
-          message: 'Send property data and image as multipart form data.'
+          message: 'Invalid JSON request.'
         }, 400);
       }
 
-      const form = await new Response(req.bodyBinary, {
-        headers: {
-          'content-type': contentType
-        }
-      }).formData();
+      const property = payload.property;
+      const imageData = payload.image;
 
-      const propertyText = form.get('property');
-      const image = form.get('image');
-
-      if (typeof propertyText !== 'string' || !image || typeof image === 'string') {
+      if (!property || typeof property !== 'object') {
         return res.json({
           success: false,
-          message: 'Property information and one image are required.'
+          message: 'Property information is required.'
         }, 400);
       }
-
-      const property = JSON.parse(propertyText);
 
       const requiredFields = [
         'title',
@@ -114,8 +128,6 @@ export default async ({ req, res, log, error }) => {
         'listingType',
         'price',
         'currency',
-        'bedrooms',
-        'bathrooms',
         'ownerName',
         'ownerPhone',
         'ownerEmail'
@@ -125,7 +137,7 @@ export default async ({ req, res, log, error }) => {
         if (
           property[field] === undefined ||
           property[field] === null ||
-          property[field] === ''
+          String(property[field]).trim() === ''
         ) {
           return res.json({
             success: false,
@@ -135,79 +147,120 @@ export default async ({ req, res, log, error }) => {
       }
 
       if (!['MW', 'CD'].includes(property.countryCode)) {
-        return res.json({ success: false, message: 'Invalid country.' }, 400);
+        return res.json({
+          success: false,
+          message: 'Invalid country.'
+        }, 400);
       }
 
       if (!['House', 'Apartment', 'Land', 'Shop', 'Office', 'Hotel'].includes(property.type)) {
-        return res.json({ success: false, message: 'Invalid property type.' }, 400);
+        return res.json({
+          success: false,
+          message: 'Invalid property type.'
+        }, 400);
       }
 
       if (!['Rent', 'Sale'].includes(property.listingType)) {
-        return res.json({ success: false, message: 'Invalid listing type.' }, 400);
+        return res.json({
+          success: false,
+          message: 'Invalid listing type.'
+        }, 400);
       }
 
       if (!['MWK', 'USD', 'CDF'].includes(property.currency)) {
-        return res.json({ success: false, message: 'Invalid currency.' }, 400);
+        return res.json({
+          success: false,
+          message: 'Invalid currency.'
+        }, 400);
+      }
+
+      const price = Number(property.price);
+
+      if (!Number.isFinite(price) || price <= 0) {
+        return res.json({
+          success: false,
+          message: 'Invalid property price.'
+        }, 400);
       }
 
       if (
-        !Number.isFinite(Number(property.price)) ||
-        Number(property.price) <= 0 ||
-        !Number.isInteger(Number(property.bedrooms)) ||
-        Number(property.bedrooms) < 0 ||
-        !Number.isInteger(Number(property.bathrooms)) ||
-        Number(property.bathrooms) < 0
+        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(property.ownerEmail)
       ) {
         return res.json({
           success: false,
-          message: 'Invalid price or room count.'
+          message: 'Invalid email address.'
         }, 400);
       }
 
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(property.ownerEmail)) {
-        return res.json({ success: false, message: 'Invalid email address.' }, 400);
-      }
-
-      if (!allowedTypes.includes(image.type) || image.size > 5 * 1024 * 1024) {
+      if (
+        typeof imageData !== 'string' ||
+        imageData.length > 7 * 1024 * 1024
+      ) {
         return res.json({
           success: false,
-          message: 'Use a JPEG, PNG or WebP image up to 5 MB.'
+          message: 'A valid image up to 5 MB is required.'
         }, 400);
       }
 
-      const safeName = image.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const match = imageData.match(
+        /^data:(image\/jpeg|image\/png|image\/webp);base64,([A-Za-z0-9+/]+={0,2})$/
+      );
 
-      const imageBuffer = Buffer.from(await image.arrayBuffer());
+      if (!match) {
+        return res.json({
+          success: false,
+          message: 'Use a JPEG, PNG or WebP image.'
+        }, 400);
+      }
 
+      const mimeType = match[1];
+      const imageBuffer = Buffer.from(match[2], 'base64');
+
+      if (
+        imageBuffer.length === 0 ||
+        imageBuffer.length > 5 * 1024 * 1024 ||
+        !validateImage(imageBuffer, mimeType)
+      ) {
+        return res.json({
+          success: false,
+          message: 'The image is invalid or exceeds 5 MB.'
+        }, 400);
+      }
+
+      const extension = allowedTypes[mimeType];
+      const fileName = `property-${ID.unique()}.${extension}`;
+
+      // Upload private image
       const uploadedFile = await storage.createFile({
         bucketId: BUCKET_ID,
         fileId: ID.unique(),
-        file: InputFile.fromBuffer(imageBuffer, safeName),
+        file: InputFile.fromBuffer(imageBuffer, fileName),
         permissions: []
       });
 
       uploadedFileId = uploadedFile.$id;
 
+      // Save property as Pending
       const row = await tablesDB.createRow({
         databaseId: DATABASE_ID,
         tableId: TABLE_ID,
         rowId: ID.unique(),
         data: {
-          Title: property.title,
-          Description: property.description,
+          Title: String(property.title).trim(),
+          Description: String(property.description).trim(),
           countryCode: property.countryCode,
-          City: property.city,
-          Area: property.area,
+          City: String(property.city).trim(),
+          Area: String(property.area).trim(),
           propertyType: property.type,
           listingType: property.listingType,
-          Price: Number(property.price),
+          Price: price,
           Currency: property.currency,
-          Bedrooms: Number(property.bedrooms),
-          Bathrooms: Number(property.bathrooms),
-          ImageField: uploadedFile.$id,
-          ownerName: property.ownerName,
-          ownerPhone: property.ownerPhone,
-          ownerEmail: property.ownerEmail,
+          Bedrooms: Math.max(0, Math.floor(Number(property.bedrooms) || 0)),
+          Bathrooms: Math.max(0, Math.floor(Number(property.bathrooms) || 0)),
+          ImageField: uploadedFileId,
+          ownerName: String(property.ownerName).trim(),
+          ownerPhone: String(property.ownerPhone).trim(),
+          ownerEmail: String(property.ownerEmail).trim(),
           status: 'Pending',
           verified: false
         }
