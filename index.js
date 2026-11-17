@@ -21,7 +21,9 @@ const allowedTypes = {
 
 function validateImage(buffer, mimeType) {
   if (mimeType === 'image/jpeg') {
-    return buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+    return buffer[0] === 0xff &&
+      buffer[1] === 0xd8 &&
+      buffer[2] === 0xff;
   }
 
   if (mimeType === 'image/png') {
@@ -49,7 +51,76 @@ export default async ({ req, res, log, error }) => {
   const tablesDB = new TablesDB(client);
   const storage = new Storage(client);
 
-  // PUBLIC PROPERTY LIST
+  // SECURE IMAGE DELIVERY
+  if (req.method === 'GET' && req.path.startsWith('/images/')) {
+    try {
+      const fileId = decodeURIComponent(
+        req.path.slice('/images/'.length)
+      );
+
+      if (!fileId || fileId.includes('/')) {
+        return res.json({
+          success: false,
+          message: 'Invalid image ID.'
+        }, 400);
+      }
+
+      // Only retrieve images belonging to approved properties.
+      const result = await tablesDB.listRows({
+        databaseId: DATABASE_ID,
+        tableId: TABLE_ID,
+        queries: [
+          Query.equal('ImageField', [fileId]),
+          Query.equal('status', ['Approved']),
+          Query.limit(1)
+        ]
+      });
+
+      if (result.rows.length === 0) {
+        return res.json({
+          success: false,
+          message: 'Image not available.'
+        }, 404);
+      }
+
+      const file = await storage.getFile({
+        bucketId: BUCKET_ID,
+        fileId
+      });
+
+      if (!allowedTypes[file.mimeType]) {
+        return res.json({
+          success: false,
+          message: 'Unsupported image type.'
+        }, 415);
+      }
+
+      const image = await storage.getFileView({
+        bucketId: BUCKET_ID,
+        fileId
+      });
+
+      return res.binary(
+        Buffer.from(image),
+        200,
+        {
+          'Content-Type': file.mimeType,
+          'Cache-Control': 'public, max-age=300',
+          'X-Content-Type-Options': 'nosniff'
+        }
+      );
+
+    } catch (err) {
+      error('Image delivery failed: ' + err.message);
+
+      return res.json({
+        success: false,
+        message: 'Unable to retrieve image.'
+      }, 500);
+    }
+  }
+
+  // PUBLIC APPROVED PROPERTY LIST
   if (req.method === 'GET') {
     try {
       const result = await tablesDB.listRows({
@@ -75,7 +146,7 @@ export default async ({ req, res, log, error }) => {
         bedrooms: row.Bedrooms,
         bathrooms: row.Bathrooms,
         size: row.size,
-        imageUrl: row.ImageField,
+        imageUrl: `/images/${encodeURIComponent(row.ImageField)}`,
         verified: row.verified
       }));
 
@@ -84,6 +155,7 @@ export default async ({ req, res, log, error }) => {
         total: result.total,
         properties
       });
+
     } catch (err) {
       error(err.message);
 
@@ -183,9 +255,7 @@ export default async ({ req, res, log, error }) => {
         }, 400);
       }
 
-      if (
-        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(property.ownerEmail)
-      ) {
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(property.ownerEmail)) {
         return res.json({
           success: false,
           message: 'Invalid email address.'
@@ -230,7 +300,7 @@ export default async ({ req, res, log, error }) => {
       const extension = allowedTypes[mimeType];
       const fileName = `property-${ID.unique()}.${extension}`;
 
-      // Upload private image
+      // Upload private image.
       const uploadedFile = await storage.createFile({
         bucketId: BUCKET_ID,
         fileId: ID.unique(),
@@ -240,7 +310,7 @@ export default async ({ req, res, log, error }) => {
 
       uploadedFileId = uploadedFile.$id;
 
-      // Save property as Pending
+      // Save property as Pending.
       const row = await tablesDB.createRow({
         databaseId: DATABASE_ID,
         tableId: TABLE_ID,
