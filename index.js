@@ -1,6 +1,7 @@
 
 import {
   Client,
+  Account,
   TablesDB,
   Storage,
   ID,
@@ -21,6 +22,33 @@ const allowedTypes = {
   'image/png': 'png',
   'image/webp': 'webp'
 };
+
+// VERIFY ADMINISTRATOR IDENTITY
+async function verifyAdmin(req) {
+  const jwt = req.headers['x-appwrite-user-jwt'];
+
+  const adminEmail = String(process.env.ADMIN_EMAIL || '')
+    .trim()
+    .toLowerCase();
+
+  if (!jwt || !adminEmail) return false;
+
+  try {
+    const authClient = new Client()
+      .setEndpoint(process.env.APPWRITE_FUNCTION_API_ENDPOINT)
+      .setProject(process.env.APPWRITE_FUNCTION_PROJECT_ID)
+      .setJWT(jwt);
+
+    const account = new Account(authClient);
+    const user = await account.get();
+
+    return (
+      String(user.email || '').trim().toLowerCase() === adminEmail
+    );
+  } catch {
+    return false;
+  }
+}
 
 function validateImage(buffer, mimeType) {
   if (mimeType === 'image/jpeg') {
@@ -47,6 +75,36 @@ function validateImage(buffer, mimeType) {
   return false;
 }
 
+function formatProperty(row, includePrivate = false) {
+  const property = {
+    id: row.$id,
+    title: row.Title,
+    description: row.Description,
+    countryCode: row.countryCode,
+    city: row.City,
+    area: row.Area,
+    type: row.propertyType,
+    listingType: row.listingType,
+    price: row.Price,
+    currency: row.Currency,
+    bedrooms: row.Bedrooms,
+    bathrooms: row.Bathrooms,
+    size: row.size,
+    imageUrl: `${FUNCTION_DOMAIN}/images/${encodeURIComponent(row.ImageField || '')}`,
+    verified: row.verified,
+    status: row.status
+  };
+
+  if (includePrivate) {
+    property.ownerName = row.ownerName;
+    property.ownerPhone = row.ownerPhone;
+    property.ownerEmail = row.ownerEmail;
+    property.imageId = row.ImageField;
+  }
+
+  return property;
+}
+
 export default async ({ req, res, log, error }) => {
   const client = new Client()
     .setEndpoint(process.env.APPWRITE_FUNCTION_API_ENDPOINT)
@@ -56,7 +114,154 @@ export default async ({ req, res, log, error }) => {
   const tablesDB = new TablesDB(client);
   const storage = new Storage(client);
 
+  // ==========================================
+  // ADMIN API — ALL ROUTES REQUIRE ADMIN LOGIN
+  // ==========================================
+
+  if (req.path.startsWith('/admin/')) {
+    const isAdmin = await verifyAdmin(req);
+
+    if (!isAdmin) {
+      return res.json({
+        success: false,
+        message: 'Administrator access denied.'
+      }, 401);
+    }
+
+    // GET ALL PROPERTIES, INCLUDING PENDING
+    if (
+      req.method === 'GET' &&
+      req.path === '/admin/properties'
+    ) {
+      try {
+        const result = await tablesDB.listRows({
+          databaseId: DATABASE_ID,
+          tableId: TABLE_ID,
+          queries: [
+            Query.limit(100)
+          ]
+        });
+
+        const properties = result.rows.map(row =>
+          formatProperty(row, true)
+        );
+
+        return res.json({
+          success: true,
+          total: result.total,
+          properties
+        });
+
+      } catch (err) {
+        error('Admin property listing failed: ' + err.message);
+
+        return res.json({
+          success: false,
+          message: 'Unable to retrieve administrator properties.'
+        }, 500);
+      }
+    }
+
+    // APPROVE OR REJECT A PROPERTY
+    const updateMatch = req.path.match(
+      /^\/admin\/properties\/([^/]+)$/
+    );
+
+    if (req.method === 'PATCH' && updateMatch) {
+      try {
+        const propertyId = decodeURIComponent(updateMatch[1]);
+        const payload = req.bodyJson;
+
+        if (!payload || !['Approved', 'Rejected'].includes(payload.status)) {
+          return res.json({
+            success: false,
+            message: 'Status must be Approved or Rejected.'
+          }, 400);
+        }
+
+        const updated = await tablesDB.updateRow({
+          databaseId: DATABASE_ID,
+          tableId: TABLE_ID,
+          rowId: propertyId,
+          data: {
+            status: payload.status,
+            verified: payload.status === 'Approved'
+          }
+        });
+
+        return res.json({
+          success: true,
+          message: 'Property status updated successfully.',
+          property: formatProperty(updated, true)
+        });
+
+      } catch (err) {
+        error('Admin property update failed: ' + err.message);
+
+        return res.json({
+          success: false,
+          message: 'Unable to update this property.'
+        }, 500);
+      }
+    }
+
+    // DELETE A PROPERTY AND ITS IMAGE
+    const deleteMatch = req.path.match(
+      /^\/admin\/properties\/([^/]+)$/
+    );
+
+    if (req.method === 'DELETE' && deleteMatch) {
+      try {
+        const propertyId = decodeURIComponent(deleteMatch[1]);
+
+        const property = await tablesDB.getRow({
+          databaseId: DATABASE_ID,
+          tableId: TABLE_ID,
+          rowId: propertyId
+        });
+
+        await tablesDB.deleteRow({
+          databaseId: DATABASE_ID,
+          tableId: TABLE_ID,
+          rowId: propertyId
+        });
+
+        if (property.ImageField) {
+          try {
+            await storage.deleteFile({
+              bucketId: BUCKET_ID,
+              fileId: property.ImageField
+            });
+          } catch (imageError) {
+            error('Image cleanup failed: ' + imageError.message);
+          }
+        }
+
+        return res.json({
+          success: true,
+          message: 'Property deleted successfully.'
+        });
+
+      } catch (err) {
+        error('Admin property deletion failed: ' + err.message);
+
+        return res.json({
+          success: false,
+          message: 'Unable to delete this property.'
+        }, 500);
+      }
+    }
+
+    return res.json({
+      success: false,
+      message: 'Admin route not found.'
+    }, 404);
+  }
+
+  // ==========================================
   // SECURE IMAGE DELIVERY
+  // ==========================================
+
   if (req.method === 'GET' && req.path.startsWith('/images/')) {
     try {
       const fileId = decodeURIComponent(
@@ -70,7 +275,6 @@ export default async ({ req, res, log, error }) => {
         }, 400);
       }
 
-      // Only deliver images belonging to approved properties.
       const result = await tablesDB.listRows({
         databaseId: DATABASE_ID,
         tableId: TABLE_ID,
@@ -125,7 +329,10 @@ export default async ({ req, res, log, error }) => {
     }
   }
 
+  // ==========================================
   // PUBLIC APPROVED PROPERTY LIST
+  // ==========================================
+
   if (req.method === 'GET') {
     try {
       const result = await tablesDB.listRows({
@@ -137,23 +344,9 @@ export default async ({ req, res, log, error }) => {
         ]
       });
 
-      const properties = result.rows.map(row => ({
-        id: row.$id,
-        title: row.Title,
-        description: row.Description,
-        countryCode: row.countryCode,
-        city: row.City,
-        area: row.Area,
-        type: row.propertyType,
-        listingType: row.listingType,
-        price: row.Price,
-        currency: row.Currency,
-        bedrooms: row.Bedrooms,
-        bathrooms: row.Bathrooms,
-        size: row.size,
-        imageUrl: `${FUNCTION_DOMAIN}/images/${encodeURIComponent(row.ImageField)}`,
-        verified: row.verified
-      }));
+      const properties = result.rows.map(row =>
+        formatProperty(row)
+      );
 
       return res.json({
         success: true,
@@ -171,7 +364,10 @@ export default async ({ req, res, log, error }) => {
     }
   }
 
+  // ==========================================
   // PROPERTY SUBMISSION
+  // ==========================================
+
   if (req.method === 'POST') {
     let uploadedFileId = null;
 
@@ -315,7 +511,6 @@ export default async ({ req, res, log, error }) => {
       const extension = allowedTypes[mimeType];
       const fileName = `property-${ID.unique()}.${extension}`;
 
-      // Upload private image.
       const uploadedFile = await storage.createFile({
         bucketId: BUCKET_ID,
         fileId: ID.unique(),
@@ -325,7 +520,6 @@ export default async ({ req, res, log, error }) => {
 
       uploadedFileId = uploadedFile.$id;
 
-      // Save property as Pending.
       const row = await tablesDB.createRow({
         databaseId: DATABASE_ID,
         tableId: TABLE_ID,
