@@ -167,7 +167,7 @@ export default async ({ req, res, log, error }) => {
       /^\/admin\/properties\/([^/]+)$/
     );
 
-    if (req.method === 'PATCH' && updateMatch) {
+    if (req.method === 'POST' && updateMatch && req.bodyJson?.status) {
       try {
         const propertyId = decodeURIComponent(updateMatch[1]);
         const payload = req.bodyJson;
